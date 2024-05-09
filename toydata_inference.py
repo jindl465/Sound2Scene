@@ -8,7 +8,7 @@ from torch.autograd import Variable
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import argparse
-from model import AVENet
+from model_image import A2INet
 from torchvision.utils import save_image,make_grid
 from inference.generate_images import get_model
 from scipy import signal
@@ -18,6 +18,7 @@ from pydub import AudioSegment
 from torchvision.transforms.functional import to_pil_image
 import pdb
 import shutil
+from PIL import Image as Image_PIL
 
 
 def get_arguments():
@@ -49,7 +50,7 @@ def get_arguments():
         default='B',
         type=str,
         help='Shortcut type of resnet (A | B)')
-    parser.add_argument('--checkpoint_vggish', dest='checkpoint',help='Path of checkpoint file for load model')
+    parser.add_argument('--checkpoint_vggish', dest='checkpoint',help='Path of checkpoint file for load model', default="./samples/output/test.pth")
 
     #Defining image encoder and image decoder
     parser.add_argument('--root_path', default="./checkpoints")
@@ -67,34 +68,34 @@ def get_arguments():
 
     #Defining directories
     parser.add_argument("--dataset", type=str, default="vgg", choices=["vgg", "vegas"],help="Dataset in which the model has been trained on.", )
-    parser.add_argument("--wav_path", type=str)
-    parser.add_argument("--out_path", type=str)
+    parser.add_argument("--img_path", type=str, default="./samples/testimages")
+    parser.add_argument("--out_path", type=str, default="./samples/output")
 
 
 
     return parser.parse_args()
 
-def load_data(args, batch_size=None):
-    if batch_size==None:
-        batch_size=args.batch_size
+# def load_data(args, batch_size=None):
+#     if batch_size==None:
+#         batch_size=args.batch_size
+#
+#     if args.dataset == 'vgg':
+#         aud_path = os.path.join(args.vgg_dir, "audios")
+#         vid_path = os.path.join(args.vgg_dir, "frames_10fps")
+#         train_dataset = GetVGGSound(args.data_txt, args.annotation, aud_path, vid_path, vid_path)
+#         test_dataset = GetVGGSound(args.data_t_txt, args.annotation, aud_path, vid_path, vid_path)
+#
+#     elif args.dataset == "vegas":
+#         train_dataset = GetAudioVideoDataset(args.data_txt, args.aud_path, args.emb_path, args.img_path)
+#         test_dataset = GetAudioVideoDataset(args.data_t_txt, args.aud_t_path, args.emb_t_path, args.img_t_path)
+#
+#     #train_loader=None
+#     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+#     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+#
+#     return train_loader, test_loader
 
-    if args.dataset == 'vgg':
-        aud_path = os.path.join(args.vgg_dir, "audios")
-        vid_path = os.path.join(args.vgg_dir, "frames_10fps")
-        train_dataset = GetVGGSound(args.data_txt, args.annotation, aud_path, vid_path, vid_path)
-        test_dataset = GetVGGSound(args.data_t_txt, args.annotation, aud_path, vid_path, vid_path)
-
-    elif args.dataset == "vegas":
-        train_dataset = GetAudioVideoDataset(args.data_txt, args.aud_path, args.emb_path, args.img_path)
-        test_dataset = GetAudioVideoDataset(args.data_t_txt, args.aud_t_path, args.emb_t_path, args.img_t_path)
-
-    #train_loader=None
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-
-    return train_loader, test_loader
-
-def showImage(args,generator,feature_extractor, emb):
+def makeAudio(args,generator,feature_extractor, emb):
     # define noise_vectors
     z = torch.empty(8,generator.dim_z).normal_(mean=0, std=args.z_var)
 
@@ -115,42 +116,39 @@ def gen_name(tuple):
         name = name+i+"_"
     return name
 
-def audio2spectrogra(wav_file):
-    samples, samplerate = sf.read(wav_file)
 
-    # repeat in case audio is too short
-    resamples = np.tile(samples, 10)[:160000]
-    resamples[resamples > 1.] = 1.
-    resamples[resamples < -1.] = -1.
-    frequencies, times, spectrogram = signal.spectrogram(resamples, samplerate, nperseg=512, noverlap=353)
-    spectrogram = np.log(spectrogram + 1e-7)
-    mean = np.mean(spectrogram)
-    std = np.std(spectrogram)
-    spectrogram = np.divide(spectrogram - mean, std + 1e-9)
+def preprocess_img_feature(img_path):
+    pil_image = Image_PIL.open(img_path).convert('RGB')
+    norm_mean = torch.Tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    norm_std = torch.Tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    feature_transform = transforms.Compose(
+        [transforms.Resize((256, 256)), transforms.ToTensor(),
+         transforms.Normalize(norm_mean, norm_std)])
+    tensor_image = feature_transform(pil_image)
+    tensor_image = torch.nn.functional.interpolate(tensor_image.unsqueeze(0), 224, mode="bicubic", align_corners=True)
+    return tensor_image
 
-    spectrogram =  torch.from_numpy(spectrogram).unsqueeze(0)
-    return spectrogram
-
-def generate_images(args, model, generator,feature_extractor,device):
-    audio_paths = args.wav_path
+def generate_audios(args, model, generator,feature_extractor,device):
+    img_paths = args.img_path
     save_path = args.out_path
     os.makedirs(save_path, exist_ok=True)
 
-    for audio in os.listdir(audio_paths):
-        if audio != ".DS_Store":
-            audio = os.path.join(audio_paths,audio)
+    for image in os.listdir(img_paths):
+        if image != ".DS_Store":
+            image_path = os.path.join(img_paths, image)
             #audio = "./samples/inference/chainsaw.wav"
 
-            spectrogram = audio2spectrogra(audio)
-            spectrogram = Variable(spectrogram).to(device)
-            _,emb = model(spectrogram.unsqueeze(1).float())
-            output = showImage(args, generator, feature_extractor, emb)
+            image_data = preprocess_img_feature(image_path)
+            image_data = Variable(image_data.squeeze(1)).to(device)
+            img, emb = model(image_data)
+            print(emb)
+            # output = showImage(args, generator, feature_extractor, emb)
 
-            save_name = audio.split("/")[-1].split(".")[0]
-
-            save_final = os.path.join(save_path, save_name+".png")
-
-            save_image(output.cpu(), save_final)
+            # save_name = audio.split("/")[-1].split(".")[0]
+            #
+            # save_final = os.path.join(save_path, save_name+".png")
+            #
+            # save_image(output.cpu(), save_final)
 
 
 
@@ -169,7 +167,7 @@ def main():
 
     #load sound2scene model
     checkpoint = torch.load(args.checkpoint,map_location=device)
-    model = AVENet(args).to(device)
+    model = A2INet(args).to(device)
     model.load_state_dict(checkpoint)
     model.eval()
 
@@ -192,7 +190,7 @@ def main():
         exp_name, args.root_path, args.model_backbone, device=device
     )
 
-    generate_images(args,model, generator,feature_extractor,device)
+    generate_audios(args, model, generator, feature_extractor, device)
 
 if __name__=='__main__':
     main()

@@ -118,7 +118,6 @@ def load_dataset(args):
     train_dataset = GetVGGSound(args.data_path)
     test_dataset = GetVGGSound(args.data_path)
 
-
     return train_dataset, test_dataset
 
 

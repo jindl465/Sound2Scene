@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-
-
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.environ["PYTORCH_USE_CUDA_DSA"] = "1"
 
 class L2_Loss():
     def __init__(self,device):
@@ -54,21 +55,30 @@ class InfoNCE_with_L2():
         self.logit_scale = nn.Parameter(torch.ones([]) * 1)
         self.device = device
 
-    def loss_fn(self, audio_features, image_features):
+    def loss_fn(self, audio_features, image_features, index):
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         audio_features = audio_features / audio_features.norm(dim=-1, keepdim=True)
 
+        onehot_lists = []
+        onehot_dict = {}
+        count = 0
+
+        for dirs in index:
+            if dirs not in onehot_dict.keys():
+                onehot_dict[dirs] = count
+                count += 1
+            onehot_lists.append(onehot_dict[dirs])
 
         cdist_per_image = torch.cdist(image_features, audio_features, p=2)*self.logit_scale
         # cdist_per_image = (torch.diag(torch.matmul(image_features,image_features.transpose(0,1)),0)+torch.diag(torch.matmul(audio_features,audio_features.transpose(0,1)),0)-2*torch.matmul(image_features,audio_features.transpose(0,1)))**(1/2)
         cdist_per_aud = cdist_per_image.t()
 
-        ground_truth = torch.arange(audio_features.shape[0], dtype=torch.long, device=self.device)
-        loss1= self.loss_img(-cdist_per_image, ground_truth)
-        loss2=self.loss_aud(-cdist_per_aud, ground_truth)
+        # ground_truth = torch.arange(audio_features.shape[0], dtype=torch.long, device=self.device)
+        ground_truth = torch.tensor(onehot_lists, dtype=torch.long, device=self.device)
+        loss1 = self.loss_img(-cdist_per_image, ground_truth)
+        loss2 = self.loss_aud(-cdist_per_aud, ground_truth)
         total_loss = (loss1+loss2)/2
         #total_loss = (self.loss_img(-cdist_per_image, ground_truth) + self.loss_aud(-cdist_per_aud, ground_truth)) / 2
-
 
 
         return total_loss
